@@ -137,6 +137,7 @@ class RdpClipboardBridge : Form
         menu.Items.Add(Texts.Get(TextId.MenuOpenTempFolder), null, OnOpenTempFolderClicked);
         menu.Items.Add(installMenuItem);
         menu.Items.Add(uninstallMenuItem);
+        menu.Items.Add(Texts.Get(TextId.MenuAbout), null, OnAboutClicked);
         menu.Items.Add(Texts.Get(TextId.MenuExit), null, OnExitClicked);
         menu.Opening += OnMenuOpening;
         KeepOpenWhileTickingFileTypes(menu);
@@ -468,9 +469,23 @@ class RdpClipboardBridge : Form
         if (WhileDialogOpen<bool>(InstallFlow.ConfirmAndUninstall)) Close();
     }
 
+    void OnAboutClicked(object sender, EventArgs e)
+    {
+        WhileDialogOpen(AboutDialog.Open);
+    }
+
     void OnExitClicked(object sender, EventArgs e)
     {
         Close();
+    }
+
+    void WhileDialogOpen(Action dialog)
+    {
+        WhileDialogOpen<bool>(delegate
+        {
+            dialog();
+            return true;
+        });
     }
 
     T WhileDialogOpen<T>(Func<T> dialog)
@@ -1414,7 +1429,8 @@ static class Installation
         catch (Exception) { return null; }
     }
 
-    // A copy that was just told to exit can hold its exe a moment longer than its mutex.
+    // A copy that was just told to exit can hold its exe a moment longer than its mutex: replacing
+    // it then fails with a sharing violation or, for the delete, with access denied.
     public static void CopyToInstallLocation()
     {
         Directory.CreateDirectory(InstallDirectory);
@@ -1422,14 +1438,46 @@ static class Installation
         {
             try
             {
-                File.Copy(CurrentExePath, InstalledExePath, true);
+                WriteFreshCopy(CurrentExePath, InstalledExePath);
                 return;
             }
-            catch (IOException)
+            catch (Exception exception)
             {
+                if (!(exception is IOException || exception is UnauthorizedAccessException)) throw;
                 if (attempt == CopyAttempts) throw;
                 Thread.Sleep(CopyRetryMilliseconds);
             }
+        }
+    }
+
+    // A downloaded exe carries the browser's "from the internet" mark, the alternate data stream
+    // Zone.Identifier. The exe is not signed, so a marked installed copy would bring Windows' security
+    // warning back at every logon, although the user already accepted it for the file they started.
+    // Not File.Copy: it copies alternate streams along. And not deleting the stream afterwards:
+    // removing that mark is an attacker technique that endpoint security products flag. Only the
+    // content is copied, like a setup program writes its files. Overwriting in place would keep the
+    // streams of an earlier install, so the copy goes to a new file that then takes the old one's
+    // place - and a failed write leaves the old copy as it was.
+    static void WriteFreshCopy(string sourcePath, string targetPath)
+    {
+        string newPath = targetPath + ".new";
+        try
+        {
+            File.Delete(newPath);
+            using (FileStream source = File.OpenRead(sourcePath))
+            using (FileStream target = new FileStream(newPath, FileMode.CreateNew, FileAccess.Write))
+            {
+                source.CopyTo(target);
+            }
+            File.Delete(targetPath);
+            File.Move(newPath, targetPath);
+        }
+        catch (Exception)
+        {
+            // a file left behind would keep uninstalling from removing the folder
+            try { File.Delete(newPath); }
+            catch (Exception) { }
+            throw;
         }
     }
 
@@ -1689,7 +1737,10 @@ static class InstallFlow
     {
         try
         {
+            // Not through the shell, which is where Windows checks for the download mark. The
+            // installed copy is written without one; this keeps the hand-over quiet even if it had.
             ProcessStartInfo startInfo = new ProcessStartInfo(exePath);
+            startInfo.UseShellExecute = false;
             startInfo.WorkingDirectory = Path.GetDirectoryName(exePath);
             Process.Start(startInfo).Dispose();
         }
@@ -1926,6 +1977,111 @@ class SizeLimitDialog : Form
     }
 }
 
+// Laid out like SizeLimitDialog: in font units, one column, the button at the bottom right.
+class AboutDialog : Form
+{
+    const string ProjectUrl = "https://github.com/enertech-ch/rdp-clipboard-bridge";
+    const int TextWidth = 320;
+    const int Spacing = 12;
+
+    public static void Open()
+    {
+        using (AboutDialog dialog = new AboutDialog()) dialog.ShowDialog();
+    }
+
+    // build.ps1 stamps x.y.z.0; the fourth part is always 0 and says nothing
+    static string StampedVersion()
+    {
+        return typeof(AboutDialog).Assembly.GetName().Version.ToString(3);
+    }
+
+    AboutDialog()
+    {
+        Text = Texts.ProductName;
+        Icon = AppIcon.Large;
+        Font = SystemFonts.MessageBoxFont;
+        AutoScaleDimensions = new SizeF(6F, 13F);
+        AutoScaleMode = AutoScaleMode.Font;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        // Left on, so the window stays unowned: only then does the exit request of a newer copy,
+        // a broadcast, reach it.
+        ShowInTaskbar = true;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+
+        Button ok = new Button();
+        ok.Text = Texts.Get(TextId.ButtonOk);
+        ok.AutoSize = true;
+        ok.DialogResult = DialogResult.OK;
+        ok.Anchor = AnchorStyles.Right;
+        ok.Margin = Padding.Empty;
+        ok.Padding = new Padding(Spacing / 2, 2, Spacing / 2, 2);
+
+        TableLayoutPanel content = new TableLayoutPanel();
+        content.ColumnCount = 1;
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        content.AutoSize = true;
+        content.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        content.Padding = new Padding(Spacing);
+        content.Controls.Add(NewText(Texts.ProductName + "\n" + Texts.Get(TextId.AboutVersion, StampedVersion())));
+        content.Controls.Add(NewText(Texts.Get(TextId.AboutExplanation, Texts.ProductName)));
+        content.Controls.Add(NewProjectLink());
+        content.Controls.Add(ok);
+        Controls.Add(content);
+
+        AcceptButton = ok;
+        CancelButton = ok;
+        ActiveControl = ok;
+    }
+
+    static Label NewText(string text)
+    {
+        Label label = new Label();
+        label.AutoSize = true;
+        label.MaximumSize = new Size(TextWidth, 0);
+        label.Margin = new Padding(0, 0, 0, Spacing);
+        label.Text = text;
+        return label;
+    }
+
+    static LinkLabel NewProjectLink()
+    {
+        LinkLabel link = new LinkLabel();
+        link.AutoSize = true;
+        link.Margin = new Padding(0, 0, 0, Spacing);
+        link.Text = ProjectUrl;
+        link.LinkClicked += delegate { OpenInBrowser(ProjectUrl); };
+        return link;
+    }
+
+    // Nothing may escape the message loop. Without a browser to start the link simply does
+    // nothing - the address is on screen to be typed in.
+    static void OpenInBrowser(string url)
+    {
+        try
+        {
+            Process.Start(url);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    // a newer copy taking over closes this too
+    protected override void WndProc(ref Message message)
+    {
+        if (SingleInstance.IsExitRequest(message.Msg))
+        {
+            Close();
+            return;
+        }
+        base.WndProc(ref message);
+    }
+}
+
 // The exe's own icon from its Win32 resources. csc stores the /win32icon group under id 32512, and
 // LoadImage picks the frame drawn for the requested size - the .ico has hand-made small frames,
 // while Icon.ExtractAssociatedIcon would only scale the 32 px one down. Reading the resource also
@@ -1978,7 +2134,10 @@ enum TextId
     FileTypeFolders,
     MenuInstall,
     MenuUninstall,
+    MenuAbout,
     MenuExit,
+    AboutVersion,
+    AboutExplanation,
     TrayTooltipPaused,
     TrayTooltipMetered,
     TrayTooltipFileType,
@@ -2037,7 +2196,10 @@ static class Texts
             { TextId.FileTypeFolders, "Folders" },
             { TextId.MenuInstall, "Install…" },
             { TextId.MenuUninstall, "Uninstall" },
+            { TextId.MenuAbout, "About…" },
             { TextId.MenuExit, "Exit" },
+            { TextId.AboutVersion, "Version {0}" },
+            { TextId.AboutExplanation, "{0} makes files copied in a Remote Desktop session pasteable in the new Outlook and similar apps. It runs in the tray of the PC you connect from." },
             { TextId.TrayTooltipPaused, "{0} (paused)" },
             { TextId.TrayTooltipMetered, "{0} (paused: metered connection)" },
             { TextId.TrayTooltipFileType, "{0} (not converted: file type)" },
@@ -2084,7 +2246,10 @@ static class Texts
             { TextId.FileTypeFolders, "Ordner" },
             { TextId.MenuInstall, "Installieren…" },
             { TextId.MenuUninstall, "Deinstallieren" },
+            { TextId.MenuAbout, "Info…" },
             { TextId.MenuExit, "Beenden" },
+            { TextId.AboutVersion, "Version {0}" },
+            { TextId.AboutExplanation, "Mit {0} lassen sich Dateien, die in einer Remotedesktopsitzung kopiert wurden, im neuen Outlook und ähnlichen Apps einfügen. Es läuft im Infobereich des PCs, von dem aus Sie sich verbinden." },
             { TextId.TrayTooltipPaused, "{0} (pausiert)" },
             { TextId.TrayTooltipMetered, "{0} (pausiert: getaktete Verbindung)" },
             { TextId.TrayTooltipFileType, "{0} (nicht umgewandelt: Dateityp)" },
@@ -2131,7 +2296,10 @@ static class Texts
             { TextId.FileTypeFolders, "Dossiers" },
             { TextId.MenuInstall, "Installer…" },
             { TextId.MenuUninstall, "Désinstaller" },
+            { TextId.MenuAbout, "À propos…" },
             { TextId.MenuExit, "Quitter" },
+            { TextId.AboutVersion, "Version {0}" },
+            { TextId.AboutExplanation, "{0} permet de coller dans le nouvel Outlook et les applications similaires les fichiers copiés dans une session Bureau à distance. Il s’exécute dans la zone de notification du PC à partir duquel vous vous connectez." },
             { TextId.TrayTooltipPaused, "{0} (suspendu)" },
             { TextId.TrayTooltipMetered, "{0} (suspendu : connexion limitée)" },
             { TextId.TrayTooltipFileType, "{0} (non converti : type de fichier)" },
@@ -2178,7 +2346,10 @@ static class Texts
             { TextId.FileTypeFolders, "Cartelle" },
             { TextId.MenuInstall, "Installa…" },
             { TextId.MenuUninstall, "Disinstalla" },
+            { TextId.MenuAbout, "Informazioni…" },
             { TextId.MenuExit, "Esci" },
+            { TextId.AboutVersion, "Versione {0}" },
+            { TextId.AboutExplanation, "{0} consente di incollare nel nuovo Outlook e in app simili i file copiati in una sessione Desktop remoto. Viene eseguito nell'area di notifica del PC da cui ci si connette." },
             { TextId.TrayTooltipPaused, "{0} (in pausa)" },
             { TextId.TrayTooltipMetered, "{0} (in pausa: connessione a consumo)" },
             { TextId.TrayTooltipFileType, "{0} (non convertito: tipo di file)" },
@@ -2225,7 +2396,10 @@ static class Texts
             { TextId.FileTypeFolders, "Carpetas" },
             { TextId.MenuInstall, "Instalar…" },
             { TextId.MenuUninstall, "Desinstalar" },
+            { TextId.MenuAbout, "Acerca de…" },
             { TextId.MenuExit, "Salir" },
+            { TextId.AboutVersion, "Versión {0}" },
+            { TextId.AboutExplanation, "{0} permite pegar en el nuevo Outlook y en aplicaciones similares los archivos copiados en una sesión de Escritorio remoto. Se ejecuta en el área de notificación del equipo desde el que se conecta." },
             { TextId.TrayTooltipPaused, "{0} (en pausa)" },
             { TextId.TrayTooltipMetered, "{0} (en pausa: conexión de uso medido)" },
             { TextId.TrayTooltipFileType, "{0} (sin convertir: tipo de archivo)" },
@@ -2272,7 +2446,10 @@ static class Texts
             { TextId.FileTypeFolders, "Pastas" },
             { TextId.MenuInstall, "Instalar…" },
             { TextId.MenuUninstall, "Desinstalar" },
+            { TextId.MenuAbout, "Sobre…" },
             { TextId.MenuExit, "Sair" },
+            { TextId.AboutVersion, "Versão {0}" },
+            { TextId.AboutExplanation, "{0} permite colar no novo Outlook e em aplicativos semelhantes os arquivos copiados em uma sessão de Área de Trabalho Remota. Ele é executado na área de notificação do PC a partir do qual você se conecta." },
             { TextId.TrayTooltipPaused, "{0} (pausado)" },
             { TextId.TrayTooltipMetered, "{0} (pausado: conexão limitada)" },
             { TextId.TrayTooltipFileType, "{0} (não convertido: tipo de arquivo)" },
@@ -2319,7 +2496,10 @@ static class Texts
             { TextId.FileTypeFolders, "Папки" },
             { TextId.MenuInstall, "Установить…" },
             { TextId.MenuUninstall, "Удалить" },
+            { TextId.MenuAbout, "О программе…" },
             { TextId.MenuExit, "Выход" },
+            { TextId.AboutVersion, "Версия {0}" },
+            { TextId.AboutExplanation, "{0} позволяет вставлять файлы, скопированные в сеансе удалённого рабочего стола, в новый Outlook и похожие приложения. Программа работает в области уведомлений компьютера, с которого вы подключаетесь." },
             { TextId.TrayTooltipPaused, "{0} (приостановлено)" },
             { TextId.TrayTooltipMetered, "{0} (приостановлено: лимитное подключение)" },
             { TextId.TrayTooltipFileType, "{0} (не преобразовано: тип файла)" },
@@ -2366,7 +2546,10 @@ static class Texts
             { TextId.FileTypeFolders, "文件夹" },
             { TextId.MenuInstall, "安装…" },
             { TextId.MenuUninstall, "卸载" },
+            { TextId.MenuAbout, "关于…" },
             { TextId.MenuExit, "退出" },
+            { TextId.AboutVersion, "版本 {0}" },
+            { TextId.AboutExplanation, "{0} 可将在远程桌面会话中复制的文件粘贴到新版 Outlook 和类似应用中。它在你发起连接的电脑的通知区域中运行。" },
             { TextId.TrayTooltipPaused, "{0}（已暂停）" },
             { TextId.TrayTooltipMetered, "{0}（已暂停：按流量计费的连接）" },
             { TextId.TrayTooltipFileType, "{0}（未转换：文件类型）" },
@@ -2413,7 +2596,10 @@ static class Texts
             { TextId.FileTypeFolders, "フォルダー" },
             { TextId.MenuInstall, "インストール…" },
             { TextId.MenuUninstall, "アンインストール" },
+            { TextId.MenuAbout, "バージョン情報…" },
             { TextId.MenuExit, "終了" },
+            { TextId.AboutVersion, "バージョン {0}" },
+            { TextId.AboutExplanation, "{0} を使うと、リモート デスクトップ セッションでコピーしたファイルを新しい Outlook などのアプリに貼り付けられるようになります。接続元の PC の通知領域で動作します。" },
             { TextId.TrayTooltipPaused, "{0} (一時停止中)" },
             { TextId.TrayTooltipMetered, "{0} (一時停止中: 従量制課金接続)" },
             { TextId.TrayTooltipFileType, "{0} (未変換: ファイルの種類)" },
@@ -2460,7 +2646,10 @@ static class Texts
             { TextId.FileTypeFolders, "Folder" },
             { TextId.MenuInstall, "Instal…" },
             { TextId.MenuUninstall, "Hapus Instalan" },
+            { TextId.MenuAbout, "Tentang…" },
             { TextId.MenuExit, "Keluar" },
+            { TextId.AboutVersion, "Versi {0}" },
+            { TextId.AboutExplanation, "{0} membuat file yang disalin dalam sesi Desktop Jarak Jauh dapat ditempelkan di Outlook baru dan aplikasi serupa. Aplikasi ini berjalan di area pemberitahuan PC yang Anda gunakan untuk terhubung." },
             { TextId.TrayTooltipPaused, "{0} (dijeda)" },
             { TextId.TrayTooltipMetered, "{0} (dijeda: koneksi terukur)" },
             { TextId.TrayTooltipFileType, "{0} (tidak dikonversi: jenis file)" },

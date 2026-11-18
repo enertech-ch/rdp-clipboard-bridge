@@ -51,6 +51,9 @@ Hover over the tray icon to see why a copy was not converted.
 It installs for your user only, into `%LOCALAPPDATA%\Programs\RdpClipboardBridge`. No administrator
 rights are needed. Afterwards it sits in the tray; the downloaded file can be deleted.
 
+The exe is not code-signed, so Windows warns once before starting the downloaded file. The installed
+copy starts without that warning, at logon too.
+
 Install it on the PC you connect *from*. Inside a remote session it does nothing.
 
 ## Tray menu
@@ -67,6 +70,7 @@ Right-click the tray icon:
 | Open Temp Folder | opens `%TEMP%\RDPClip`, where the copied files are put |
 | Install… | only when not installed - the same choices as on first start |
 | Uninstall | only when installed - removes the program, its autostart entry, its settings and the temp folder |
+| About… | shows the version and a link to the project page |
 | Exit | ends it until the next start |
 
 The settings apply from the next copy on. When a copy was left to Remote Desktop, the tray icon's

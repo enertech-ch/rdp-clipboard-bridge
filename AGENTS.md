@@ -175,6 +175,20 @@ logon. The settings live under `HKCU\Software\RdpClipboardBridge` (`Settings`): 
 ("run without installing"), `PauseOnMetered`, `SizeLimitMB` and one `Convert<Group>` per entry of
 *File Types*, `ConvertFolders` among them. All are DWORDs. Installing clears only `InstallDeclined`; uninstalling removes the whole key.
 
+**Download mark.** The exe is not code-signed, so Windows warns before starting it while it carries
+the browser's "downloaded from the internet" mark - the alternate data stream `Zone.Identifier`.
+The user accepts that once for the downloaded file. `File.Copy` copies alternate data streams along,
+so an installed copy made with it would inherit the mark and the warning could come back at every
+logon. `Installation.WriteFreshCopy` therefore copies only the content, the way a setup program
+writes its files. Deleting the stream afterwards is not an option: removing Mark-of-the-Web is a
+known attacker technique (MITRE T1553.005) that endpoint security products flag, and an unsigned exe
+doing it looks worse than the warning. Overwriting an existing file keeps its streams, so the copy is
+written to `RdpClipboardBridge.exe.new` and then takes the old exe's place (delete + move); a failed
+write leaves the old copy as it was. The retry around it also catches `UnauthorizedAccessException`,
+because deleting an exe that an exiting copy still runs fails with access denied.
+`InstallFlow.Start` also starts the installed copy with `UseShellExecute = false`, past the shell's
+zone check, so no prompt appears at the hand-over.
+
 **Delayed self-delete.** A running exe cannot delete itself. Uninstall starts a hidden `cmd /c` that
 retries `del` and `rmdir` for a few seconds after we exit. Its working directory is `%TEMP%`, because
 a cmd sitting in the install folder would keep the folder from being removed.
@@ -277,6 +291,10 @@ By hand on Windows:
   back-and-forth.
 * Install, toggle autostart, "Install only" over an autostart install, upgrade with a newer exe
   while the installed one runs, uninstall.
+* Install from an exe downloaded with a browser (it warns once), then sign out and in: the installed
+  copy starts without a security warning.
+* Open *About…*: it shows the version of a release build, the link opens the project page in the
+  browser, and Enter, Esc and the X close it.
 * Switch the display language to German once to see the dialog, the menu and a message box.
 
 ## Code philosophy

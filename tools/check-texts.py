@@ -29,6 +29,8 @@ INTENDED_SAME = {
     ('pt', 'ButtonOk'),
     ('ja', 'ButtonOk'),
     ('id', 'ButtonOk'),
+    ('de', 'AboutVersion'),
+    ('fr', 'AboutVersion'),
 }
 
 # NotifyIcon.Text throws beyond 63 characters, so every tooltip must fit with its longest values
