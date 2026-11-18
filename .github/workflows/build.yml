@@ -1,0 +1,66 @@
+name: Build
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+    branches: ['main']
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# read-only by default; only the job that attaches the exe to a release may write
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compile RdpClipboardBridge.exe
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # python is preinstalled on the windows runners, and the check needs nothing but its stdlib
+      - name: Check translations
+        shell: pwsh
+        run: python tools/check-texts.py
+
+      # build.ps1 uses the csc that ships with .NET Framework 4, which is preinstalled on the
+      # windows runners - so there is no sdk to set up and the local build is the same one.
+      # The ref name goes through the environment rather than into the script text, where a branch
+      # name would be read as code.
+      - name: Compile
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: ./build.ps1 -Version "$env:REF_NAME"
+
+      - name: Upload as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RdpClipboardBridge
+          path: bin/RdpClipboardBridge.exe
+
+  release:
+    name: Attach to the release
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RdpClipboardBridge
+          path: bin
+
+      # gh needs no checkout when it is told the repository
+      - name: Upload to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: gh release upload "$env:TAG_NAME" bin/RdpClipboardBridge.exe --clobber
