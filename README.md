@@ -114,6 +114,12 @@ language gets English. There is no setting for it.
 Most translations were not written by native speakers. If something reads oddly in your language,
 corrections are welcome - open an issue or a pull request.
 
+Each language is one plain-text file in [`src/lang/`](src/lang), named after its two-letter code
+(`de.txt`, `fr.txt`, ...), with one `TextId = text` per line; `\n` is a line break. To correct a
+translation, edit its line. To add a language, copy `en.txt` to the new code and translate the text
+after each `=`, keeping every `{0}`, `{1}`... where the sentence needs it. The build picks the file up
+on its own, and `python3 tools/check-texts.py` tells you what is missing or does not match.
+
 ## Upgrade
 
 Download the new `RdpClipboardBridge.exe` and double-click it while the old one is running. Confirm
@@ -176,5 +182,6 @@ just download it. To build locally anyway:
 ```
 
 It uses the `csc.exe` that ships with .NET Framework 4 (present on every Windows machine and on the
-GitHub runners), so there is no SDK or NuGet dependency. The result is a ~125 KB exe in `bin\` with no
-runtime to install.
+GitHub runners), so there is no SDK or NuGet dependency. It compiles every `.cs` file under `src\` and
+embeds the language files from `src\lang\`, so the result is a single ~125 KB exe in `bin\` with
+nothing next to it and no runtime to install.

@@ -15,16 +15,37 @@ installs, autostarts, upgrades and uninstalls itself, because there is no setup 
 
 | File | Purpose |
 | --- | --- |
-| `src/RdpClipboardBridge.cs` | the whole program - keep it a single file |
+| `src/RdpClipboardBridge.cs` | the hidden tray form with `Main`: clipboard listener, the copy-and-hand-over passes, the tray menu |
+| `src/ForegroundWatcher.cs` | reports foreground window changes (`SetWinEventHook`) |
+| `src/RemoteDesktop.cs` | tells Remote Desktop's clipboard and windows apart by process |
+| `src/VirtualFileClipboard.cs` | reads the virtual files through OLE and stages them (`StagedCopy`, `VirtualFile`, `ClipboardFiles`, `ClipboardRetry`, ...) |
+| `src/CopyFilter.cs` | whether a copy is converted at all (`CopyFilter`, `LeftAloneReason`, `SizeLimit`) |
+| `src/FileTypes.cs` | the file type groups of the *File Types* submenu (`FileTypeGroup`, `FileTypes`) |
+| `src/StagingFolder.cs` | `%TEMP%\RDPClip` and the cleaning of remote names |
+| `src/SingleInstance.cs` | the mutex and the exit request of the upgrade handshake |
+| `src/Installation.cs` | install folder, Run value, writing and removing the installed copy |
+| `src/InstallFlow.cs` | the install, upgrade and uninstall steps the user goes through (`InstallFlow`, `InstallChoice`) |
+| `src/Settings.cs` | the switches under `HKCU\Software\RdpClipboardBridge` |
+| `src/NetworkCost.cs` | whether the connection is metered (Network List Manager COM interface) |
+| `src/ToolDialog.cs` | the window setup the three dialogs share |
+| `src/InstallDialog.cs`, `src/SizeLimitDialog.cs`, `src/AboutDialog.cs` | the dialogs |
+| `src/AppIcon.cs` | the exe's icon at the sizes the tray and the dialogs need |
+| `src/Texts.cs` | the `TextId` enum and `Texts`, which loads the language files |
+| `src/lang/<code>.txt` | one file per language, embedded into the exe by `build.ps1` |
 | `src/app.manifest` | `asInvoker` and system DPI awareness |
 | `src/app.ico` | exe and tray icon - generated, do not edit by hand |
 | `tools/make-icon.py` | draws `src/app.ico` from shapes (stdlib only) |
-| `tools/check-texts.py` | checks the translation tables (stdlib only); CI runs it before compiling |
-| `build.ps1` | compiles with the .NET Framework `csc` into `bin/` |
+| `tools/check-texts.py` | checks the language files (stdlib only); CI runs it before compiling |
+| `build.ps1` | compiles every `src/**/*.cs` with the .NET Framework `csc` into `bin/`, embedding `src/lang/*.txt` |
 | `.github/workflows/build.yml` | CI, and attaches the exe to a published release |
 
 ## Constraints
 
+* **One exe, sources split by concern, one file per language picked up by the build.** What ships is
+  `RdpClipboardBridge.exe` alone, with nothing next to it: the language files are embedded as
+  resources, not shipped as files. The C# source is one file per main type or closely related group
+  under `src/`, named after it, without namespaces; `build.ps1` compiles whatever `.cs` is there and
+  embeds whatever `src/lang/*.txt` is there, so a new file needs no list to be edited.
 * **No SDK, no NuGet, no dependencies.** It builds with `csc.exe` from .NET Framework 4, which is
   present on every Windows machine and on the GitHub runners. That is the reason the exe needs no
   runtime install on the machines it is used on. Do not introduce a `.csproj`, `dotnet build`, or a
@@ -32,8 +53,9 @@ installs, autostarts, upgrades and uninstalls itself, because there is no setup 
 * **C# 5 only.** That csc stops at C# 5: no string interpolation, `?.`, `nameof`, expression-bodied
   members, `out var`, auto-property initializers, pattern matching, tuples or local functions.
 * **Warning-free.** `build.ps1` compiles with `/warnaserror+`.
-* **The source is UTF-8 without BOM.** It holds the translations, and `build.ps1` passes
-  `/codepage:65001` because this csc would otherwise read it in the machine's ANSI code page.
+* **The sources and language files are UTF-8 without BOM.** `build.ps1` passes `/codepage:65001`
+  because this csc would otherwise read a `.cs` file in the machine's ANSI code page (there is
+  non-ASCII in the code too); `Texts` reads the embedded language files as UTF-8.
 * **Never needs administrator rights.** It installs into the per-user programs folder and writes only
   under `HKCU`. Keep the manifest at `asInvoker`.
 * **Nothing may escape the message loop.** It runs unattended; failures end in a tray balloon or a
@@ -218,11 +240,22 @@ a managed resource. Those handles live as long as the process, on purpose.
 
 ## Translations
 
-All user-visible text lives in `Texts` at the end of the source, one `Dictionary<TextId, string>` per
-language, keyed by two-letter ISO 639-1 code. The language is the Windows display language
-(`CurrentUICulture`, reduced to its neutral parent: `de-CH` -> `de`, `pt-BR` -> `pt`, `zh-TW` ->
-`zh`); there is no setting. English is the reference: a missing text, or a language that is not
-listed, falls back to it.
+All user-visible text lives in `src/lang/<code>.txt`, one file per language, named after its
+two-letter ISO 639-1 code. The ids are the `TextId` enum in `src/Texts.cs`. The language is the
+Windows display language (`CurrentUICulture`, reduced to its neutral parent: `de-CH` -> `de`,
+`pt-BR` -> `pt`, `zh-TW` -> `zh`); there is no setting. English (`en.txt`) is the complete
+reference: a missing text, or a language without a file, falls back to it.
+
+* The format is one `TextId = text` per line, split at the first `=` and trimmed on both sides;
+  lines starting with `#` are comments, blank lines are allowed. `\n` is a line break and `\\` a
+  backslash; nothing else is escaped, quotes included. Each file starts with a comment naming the
+  language.
+* `build.ps1` embeds every file as the resource `lang.<code>.txt` and refuses to build without
+  `en.txt` or with a file not named `<two lower-case letters>.txt`. `Texts` loads the display
+  language and English once, at first use. Loading never throws: an unreadable resource, an unknown
+  id or a malformed line is skipped, a text missing everywhere shows its id, and a translation whose
+  braces do not match is shown unformatted rather than ending the app. `Texts.Load(code)` is
+  internal so a probe can load any language, not only the machine's.
 
 * Placeholders are `string.Format` style (`{0}`), so each language orders them as its grammar wants.
   The product name is always passed in as one of them, never written into a text, so it stays
@@ -238,10 +271,11 @@ listed, falls back to it.
 * The install dialog stacks its buttons in one column under a text wrapped at a fixed width, so the
   longer German or Russian labels do not stretch it.
 
-To add a language: copy the `"en"` block inside `Languages`, change the key to the two-letter code
-and translate the texts, keeping every `{n}` of the English text. Use the wording Windows itself uses
-in that language for Remote Desktop, clipboard, install and exit. That one block is all - no other
-code changes, unless the language is right-to-left (see above).
+To add a language: add `src/lang/xx.txt` - copy `en.txt`, name it after the two-letter code, change
+the first comment and translate the texts, keeping every `{n}` of the English text. Use the wording
+Windows itself uses in that language for Remote Desktop, clipboard, install and exit. That one file is
+all - no code or build change, unless the language is right-to-left (see above). A new text id goes
+into the `TextId` enum and into `en.txt`, and should go into every other file too.
 
 ## How to verify
 
@@ -265,10 +299,12 @@ $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes("$PWD\bin\RdpCli
 $static = [Reflection.BindingFlags]'Static, Public, NonPublic'
 $assembly.GetType('StagingFolder').GetMethod('ToLocalRelativePath', $static).Invoke($null, [object[]]@('.. \..\x.txt'))
 $assembly.GetType('FileTypes').GetMethod('Of', $static).Invoke($null, [object[]]@('setup.ISO')).SettingName
+$assembly.GetType('Texts').GetMethod('Load', $static).Invoke($null, [object[]]@('de')).Count
 ```
 
-After changing texts, run `python3 tools/check-texts.py`: it checks per language that every id is
-present, that each text has exactly the `{n}` placeholders of the English one, that nothing was
+After changing texts, run `python3 tools/check-texts.py`: it checks per language that every line
+is well-formed, that every id is present once and no unknown one, that each text has exactly the
+`{n}` placeholders of the English one and no stray brace, that nothing was
 left in English by mistake, and that every `TrayTooltip*` text fits the 63 characters `NotifyIcon`
 takes (with the product name and `999` filled in). A text that is rightly the same as in English
 (`Audio`, `OK`, say) goes into its `INTENDED_SAME`.
