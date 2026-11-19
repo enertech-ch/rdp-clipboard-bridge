@@ -10,7 +10,8 @@ One small Windows tray exe. When files are copied inside a Remote Desktop sessio
 every other Chromium/WebView2 app only accept `CF_HDROP`, so pasting there does nothing. This exe
 listens for clipboard changes and downloads the virtual files into `%TEMP%\RDPClip` right after the
 copy, but replaces the clipboard with a real file drop list only once a local app comes to the
-front. Copies of unticked file types or over a size limit are left to Remote Desktop. It also
+front. In the Automatic mode copies of unticked file types or over a size limit are left to Remote
+Desktop; the On Demand mode converts a copy when Ctrl+C is pressed several times in a row regardless. It also
 installs, autostarts, upgrades and uninstalls itself, because there is no setup program.
 
 | File | Purpose |
@@ -19,7 +20,9 @@ installs, autostarts, upgrades and uninstalls itself, because there is no setup 
 | `src/ForegroundWatcher.cs` | reports foreground window changes (`SetWinEventHook`) |
 | `src/RemoteDesktop.cs` | tells Remote Desktop's clipboard and windows apart by process |
 | `src/VirtualFileClipboard.cs` | reads the virtual files through OLE and stages them (`StagedCopy`, `VirtualFile`, `ClipboardFiles`, `ClipboardRetry`, ...) |
-| `src/CopyFilter.cs` | whether a copy is converted at all (`CopyFilter`, `LeftAloneReason`, `SizeLimit`) |
+| `src/CopyFilter.cs` | whether the Automatic mode converts a copy (`CopyFilter`, `LeftAloneReason`, `SizeLimit`) |
+| `src/OnDemand.cs` | the On Demand mode's setting (`OnDemand`) |
+| `src/CopyKeyWatcher.cs` | the keyboard hook that counts Ctrl+C in Remote Desktop windows, on its own thread (`CopyKeyWatcher`, `CopyKeyPresses`) |
 | `src/FileTypes.cs` | the file type groups of the *File Types* submenu (`FileTypeGroup`, `FileTypes`) |
 | `src/StagingFolder.cs` | `%TEMP%\RDPClip` and the cleaning of remote names |
 | `src/SingleInstance.cs` | the mutex and the exit request of the upgrade handshake |
@@ -29,7 +32,7 @@ installs, autostarts, upgrades and uninstalls itself, because there is no setup 
 | `src/NetworkCost.cs` | whether the connection is metered (Network List Manager COM interface) |
 | `src/ToolDialog.cs` | the window setup the three dialogs share |
 | `src/InstallDialog.cs`, `src/SizeLimitDialog.cs`, `src/AboutDialog.cs` | the dialogs |
-| `src/AppIcon.cs` | the exe's icon at the sizes the tray and the dialogs need |
+| `src/AppIcon.cs` | the exe's icon at the sizes the tray and the dialogs need, and the orange busy variant of the tray icon |
 | `src/Texts.cs` | the `TextId` enum and `Texts`, which loads the language files |
 | `src/lang/<code>.txt` | one file per language, embedded into the exe by `build.ps1` |
 | `src/app.manifest` | `asInvoker` and system DPI awareness |
@@ -93,6 +96,76 @@ windows. Warnings about failed files are shown at the hand-over too, not at copy
 inside the session never needed them. Before handing over, the clipboard is checked to still hold
 the same copy, so something copied since is not overwritten.
 
+**Two modes, Automatic and On Demand.** `StageClipboard` reads the descriptor once and decides
+from it: a copy asked for on demand is converted, anything else is judged by `CopyFilter`, whose
+first question is whether Automatic is on (`AutoConvert`, on when not set; off gives
+`LeftAloneReason.AutomaticOff`, which the tooltip does not name - the user chose it). On Demand
+therefore overrides everything Automatic has: being off, file types, the size limit and the metered
+check. Only *Pause* stops it: a request made while paused is dropped, and pausing forgets an open
+one. The "already staged" check comes before the decision, so a copy Automatic converted at the
+first press is left as it is, and a copy converted on demand is not judged by the filter again when
+mstsc announces it once more. Nothing else remembers a forced copy, on purpose: remembering its
+description was tried and made every later copy of the same files convert without being asked for -
+by right-click > Copy, or a single Ctrl+C. A forced conversion clears the tooltip's reason when it
+starts.
+
+**Counting presses with a keyboard hook, and only while On Demand is on.** Counting from the
+clipboard was tried first and cannot work: Remote Desktop announces a quickly repeated copy only
+once - a fast double Ctrl+C gave one `WM_CLIPBOARDUPDATE`, while presses seconds apart gave one
+each. So `CopyKeyWatcher` counts the presses on the PC's keyboard with a low-level hook
+(`SetWindowsHookEx(WH_KEYBOARD_LL)`). A global keyboard hook is what keyloggers use, so it exists
+only while On Demand is not *Off* - it is installed and removed when the setting changes, at start
+(`OnHandleCreated`) and at close - and it looks at nothing but Ctrl+C; every key is passed on with
+`CallNextHookEx`, none is swallowed. A press is a key-down of C with Ctrl held, without Alt or
+Windows, while the foreground window belongs to one of `RemoteDesktop.Clients`. That test is by
+process only, never by window class, size or full screen, because both ways of working must count:
+a full desktop session is one mstsc window, while with RemoteApp every remote program is its own
+top-level mstsc window on the local desktop, between which and the local windows the user switches
+all the time. The answer is cached for the last foreground window handle only. Holding the keys
+repeats the key-down, so a new press needs a key-up of C in between (`CopyKeyPresses`); presses at
+most `MaxGapMilliseconds` (500) apart are in a row, and reaching `OnDemandCopies` (2, 3 or 4) fires
+once per run. The time is passed in so that the counter can be probed. Ctrl and Windows are tracked
+from the events the hook sees rather than from the key state, because a hook installed later - mstsc
+installs its own - may keep a key from reaching it.
+
+**The hook runs on its own thread.** Windows delivers low-level hook callbacks through the message
+loop of the installing thread, holds the keyboard until the callback returns, and silently removes a
+hook that does not answer within `LowLevelHooksTimeout`. The UI thread blocks in transfers and
+clipboard retries, so the hook has a background thread with its own `GetMessage` loop that does
+nothing but count; `Dispose` posts `WM_QUIT` to it and joins. The completing press is handed to the
+form with `BeginInvoke` - never waited for.
+
+**The On Demand request.** At the Nth press the copy's announcement may already be on the clipboard
+(from the first press) or still be on its way from the session. So the request (a) makes a pass look
+at the clipboard (`onDemandLookPending`) - but only `OnDemandSettleMilliseconds` (400) after the
+press, see below - and (b) stays open for
+`OnDemandRequestMilliseconds` (2000) after the press: a clipboard update arriving in that time -
+measured at its `WM_CLIPBOARDUPDATE`, not when a busy pass gets to it - is converted on demand too,
+also when it is a different copy than (a) converted, which it then replaces. The request arrives on
+the UI thread, possibly in the middle of a pass because COM pumps messages, so it is only noted like
+clipboard updates and foreground changes, and the running pass goes round again for it.
+
+**Why the look waits, and why a failed copy is tried again.** Found in testing: every press makes
+the session copy the files anew, and that takes away the files a transfer is still reading from the
+earlier announcement - a transfer started in the instant of the last press failed nearly every time
+("could not be copied"). So the look at the clipboard waits `OnDemandSettleMilliseconds` after the
+last press (`onDemandSettleTimer`), until the session's copy has settled. The same thing hits
+Automatic when it starts a transfer at the first of several presses, so the "already staged" check
+only holds for a copy without failed files: one with failures is downloaded again when it is
+announced or asked for once more. Both values are estimates from one RemoteApp setup.
+
+**A left click on the tray icon converts explicitly.** It sets `onDemandLookPending` without opening
+the request window - the copy was made before the click - so the pass converts what the clipboard
+holds now, past the filter, whatever Automatic and On Demand are set to. Only *Pause* stops it. The
+hand-over still waits for a local app in front, as always; the click itself puts the taskbar
+(Explorer) in front, which does not count. As feedback the tray icon turns orange while a transfer
+runs, and for at least `BusyIconMinimumMilliseconds` (800) after a click or a transfer, so a click
+on a copy converted already, or on a clipboard without virtual files, still shows it was taken.
+Clicks and transfers may overlap, so the busy state is counted (`busyCount`); the
+`System.Windows.Forms.Timer` that restores the icon checks the count again. The orange icon is the
+normal one with red and blue swapped at start (`AppIcon.SwapRedAndBlue`), so there is no second
+.ico to keep in step with `tools/make-icon.py`.
+
 **A copy is converted whole or not at all.** Converting part of a copy would make the rest vanish
 from the paste, so `CopyFilter` leaves the whole copy to Remote Desktop if anything in it is
 unticked in the tray submenu *File Types* (`FileTypes`). Each entry there is a `FileTypeGroup` with
@@ -115,9 +188,12 @@ four are rarely something one mails - ticking them is one click. The README list
 its default and its extensions; update it when a list changes. `OnMenuOpening` casts every submenu
 item to `ToolStripMenuItem`, so a separator there needs handling first.
 
-The submenu stays open while ticking (`KeepOpenWhileTickingFileTypes`, by cancelling the close the
-item click causes). That is untested; if it does not work, the menu simply closes
-after each click, as a plain menu would.
+The tray menu nests it as *Automatic > File Types*, next to *Convert Automatically*, *Size Limit*
+and *Pause on Metered Connections*, which are greyed out while Automatic is off. The File Types
+submenu stays open while ticking (`KeepOpenWhileTickingFileTypes`, by cancelling the close the item
+click causes on all three levels it runs through; a click on any other level sets it back to close,
+or a file type ticked first would keep the menu open after it). That is untested; if it does not
+work, the menu simply closes after each click, as a plain menu would.
 
 **Size limit.** `CopyFilter` also leaves a copy alone whose announced total size is over the limit
 (`SizeLimit`, DWORD `SizeLimitMB`, 1 to 999 MB of 1024 * 1024 bytes, default 25). The sum covers
@@ -131,10 +207,10 @@ exit request of a takeover closes it as well).
 
 **Why a copy was left alone.** With a 25 MB limit and four types unticked from the start, "nothing
 pastes" is common, so the tray tooltip names the reason - metered connection, file type (folders
-included) or size limit (`LeftAloneReason`, which `Stage` returns on the copy) - until the clipboard
-changes again. Changing the switch behind a metered or size-limit reason clears it, so the tooltip
-does not name a limit the copy was not judged by. There is no balloon: most copies are pasted inside
-the session and need no comment.
+included) or size limit (`LeftAloneReason`, from `CopyFilter`) - until the clipboard changes again
+or the copy is converted on demand. Changing the switch behind a metered or size-limit reason clears it, so the tooltip
+does not name a limit the copy was not judged by; switching Automatic clears any reason. There is no
+balloon: most copies are pasted inside the session and need no comment.
 
 **Metered connections.** Converting downloads every copied file at once, pasted or not, while Remote
 Desktop on its own transfers only what is pasted. With `PauseOnMetered` set (tray item *Pause on
@@ -152,8 +228,9 @@ of a transfer. `Bridge` therefore never nests: clipboard updates are counted (`c
 against `updatesLookedAt`), window changes flagged (`foregroundChanged`), and the running pass goes
 round again in `TryBridgeOnce` for whatever arrived meanwhile. Our own replacement needs no guard: it
 carries `CF_HDROP`, which `HasVirtualFilesOnly` rejects. mstsc announces the same copy again at
-times; it is recognised by its description (index, name, size and write time of every entry) and
-not downloaded twice - `Stage` hands back the staged copy it was given. Content is compared rather
+times; it is recognised by its description (index, name, size
+and write time of every entry, `ClipboardFiles.CopiedFiles`) and not downloaded twice -
+`StageClipboard` returns when it matches `staged`. Content is compared rather
 than the clipboard sequence number, because whether mstsc moves that number while it serves the
 files is unknown, and if it did nothing would ever reach the clipboard.
 
@@ -194,8 +271,9 @@ points at the running exe, so a stale value from a moved exe does not count. Ins
 value either way: "Install only" removes an existing entry instead of leaving one that points at the
 copy it was installed from, which would keep starting that copy and asking to be installed at every
 logon. The settings live under `HKCU\Software\RdpClipboardBridge` (`Settings`): `InstallDeclined`
-("run without installing"), `PauseOnMetered`, `SizeLimitMB` and one `Convert<Group>` per entry of
-*File Types*, `ConvertFolders` among them. All are DWORDs. Installing clears only `InstallDeclined`; uninstalling removes the whole key.
+("run without installing"), `AutoConvert` (on when not set), `OnDemandCopies` (0 = off, the default,
+or 2, 3, 4; anything else counts as off), `PauseOnMetered`, `SizeLimitMB` and one `Convert<Group>`
+per entry of *File Types*, `ConvertFolders` among them. All are DWORDs. Installing clears only `InstallDeclined`; uninstalling removes the whole key.
 
 **Download mark.** The exe is not code-signed, so Windows warns before starting it while it carries
 the browser's "downloaded from the internet" mark - the alternate data stream `Zone.Identifier`.
@@ -320,6 +398,21 @@ By hand on Windows:
 * Copy something else during a long transfer; pause and exit during one.
 * Untick a file type, copy a file of that type together with another one: neither is converted,
   and the tray tooltip says "file type".
+* On Demand at 2×, 3× and 4×, both in a full desktop session and with RemoteApp windows: press
+  Ctrl+C that often, in quick succession, on a copy Automatic leaves alone - it is converted once,
+  the tooltip's reason goes, and more presses change nothing. Two presses a second apart, holding
+  Ctrl+C down, and Ctrl+C in a local window must not trigger it. With RemoteApp, switch between two
+  remote programs and a local one in between. Try mstsc in full screen too: whether its own
+  keyboard hook lets ours see the keys there is unknown. Switching On Demand to *Off* removes the
+  hook.
+* Left-click the tray icon with Automatic unticked and On Demand off, after a copy in the session:
+  the icon turns orange for at least a moment, the copy is downloaded and pastes into New Outlook.
+  Click again: orange again, nothing downloaded twice. Click while paused: nothing happens. A large
+  copy keeps the icon orange until its transfer ends.
+* On Demand on a metered connection with *Pause on Metered Connections* ticked, and on a copy over
+  the size limit: both convert.
+* Untick *Convert Automatically*: nothing converts on its own, the three filters are greyed out, the
+  tooltip names no reason, and On Demand still converts.
 * Copy more than the size limit in total (several files below it each): nothing is downloaded,
   the tooltip names the limit. Change the limit in its dialog with Enter, leave it with Esc and
   with the X; the menu item shows the stored value.

@@ -2,6 +2,11 @@
 MenuPause = Suspendre
 MenuResume = Reprendre
 MenuStartWithWindows = Démarrer avec Windows
+MenuAutomatic = Automatique
+MenuConvertAutomatically = Convertir automatiquement
+MenuOnDemand = À la demande
+MenuOnDemandOff = Désactivé
+MenuOnDemandCopies = Appuyer {0}× sur Ctrl+C
 MenuOpenTempFolder = Ouvrir le dossier temporaire
 MenuPauseOnMetered = Suspendre sur connexion limitée
 MenuFileTypes = Types de fichiers

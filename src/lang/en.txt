@@ -2,6 +2,11 @@
 MenuPause = Pause
 MenuResume = Resume
 MenuStartWithWindows = Start with Windows
+MenuAutomatic = Automatic
+MenuConvertAutomatically = Convert Automatically
+MenuOnDemand = On Demand
+MenuOnDemandOff = Off
+MenuOnDemandCopies = Press Ctrl+C {0}×
 MenuOpenTempFolder = Open Temp Folder
 MenuPauseOnMetered = Pause on Metered Connections
 MenuFileTypes = File Types

@@ -2,6 +2,11 @@
 MenuPause = Приостановить
 MenuResume = Возобновить
 MenuStartWithWindows = Запускать вместе с Windows
+MenuAutomatic = Автоматически
+MenuConvertAutomatically = Преобразовывать автоматически
+MenuOnDemand = По запросу
+MenuOnDemandOff = Отключено
+MenuOnDemandCopies = Нажать CTRL+C {0} раза подряд
 MenuOpenTempFolder = Открыть временную папку
 MenuPauseOnMetered = Приостанавливать при лимитном подключении
 MenuFileTypes = Типы файлов

@@ -2,6 +2,11 @@
 MenuPause = Pausieren
 MenuResume = Fortsetzen
 MenuStartWithWindows = Mit Windows starten
+MenuAutomatic = Automatisch
+MenuConvertAutomatically = Kopierte Dateien automatisch übertragen
+MenuOnDemand = Manuell
+MenuOnDemandOff = Aus
+MenuOnDemandCopies = {0}× Strg+C kurz hintereinander
 MenuOpenTempFolder = Temp-Ordner öffnen
 MenuPauseOnMetered = Bei getakteter Verbindung pausieren
 MenuFileTypes = Dateitypen

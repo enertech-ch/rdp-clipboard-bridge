@@ -11,6 +11,8 @@ static class Settings
     public const string InstallDeclined = "InstallDeclined";
     public const string PauseOnMetered = "PauseOnMetered";
     public const string SizeLimitMB = "SizeLimitMB";
+    public const string AutoConvert = "AutoConvert";
+    public const string OnDemandCopies = "OnDemandCopies";
 
     public static bool IsOn(string name)
     {

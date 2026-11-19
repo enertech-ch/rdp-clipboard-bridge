@@ -1,11 +1,23 @@
 using System;
 using System.Collections.Generic;
 
-// Decides whether a copy is converted at all. It is taken as a whole or left to Remote Desktop as a
-// whole: converting only some of its files would make the others vanish from what gets pasted.
+// Decides whether the Automatic mode converts a copy. It is taken as a whole or left to Remote
+// Desktop as a whole: converting only some of its files would make the others vanish from what gets
+// pasted. A copy asked for on demand is not judged here at all.
 static class CopyFilter
 {
     public static LeftAloneReason ReasonToLeaveAlone(List<VirtualFile> files)
+    {
+        if (!Settings.IsOn(Settings.AutoConvert, true)) return LeftAloneReason.AutomaticOff;
+
+        // Converting transfers every copied file right away, pasted or not. Left alone, Remote
+        // Desktop transfers only what is pasted - which is what a metered connection wants.
+        if (Settings.IsOn(Settings.PauseOnMetered) && NetworkCost.IsMetered()) return LeftAloneReason.MeteredConnection;
+
+        return ReasonInFiles(files);
+    }
+
+    static LeftAloneReason ReasonInFiles(List<VirtualFile> files)
     {
         List<FileTypeGroup> leftAlone = FileTypes.NotConverted();
         bool convertFolders = !leftAlone.Contains(FileTypes.Folders);
@@ -28,6 +40,8 @@ static class CopyFilter
 enum LeftAloneReason
 {
     None,
+    // nothing to explain in the tooltip: the user switched converting off
+    AutomaticOff,
     MeteredConnection,
     FileType,
     SizeLimit

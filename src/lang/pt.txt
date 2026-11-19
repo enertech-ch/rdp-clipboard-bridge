@@ -2,6 +2,11 @@
 MenuPause = Pausar
 MenuResume = Retomar
 MenuStartWithWindows = Iniciar com o Windows
+MenuAutomatic = Automático
+MenuConvertAutomatically = Converter automaticamente
+MenuOnDemand = Sob demanda
+MenuOnDemandOff = Desativado
+MenuOnDemandCopies = Pressionar Ctrl+C {0}× seguidas
 MenuOpenTempFolder = Abrir pasta temporária
 MenuPauseOnMetered = Pausar em conexão limitada
 MenuFileTypes = Tipos de arquivo

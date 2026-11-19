@@ -42,6 +42,13 @@ static class RemoteDesktop
         return inFront != null && !IsClient(inFront) && inFront != Explorer;
     }
 
+    // Called from the hook thread too, so it touches nothing shared.
+    public static bool IsClientWindow(IntPtr window)
+    {
+        string process = ProcessNameBehind(window);
+        return process != null && IsClient(process);
+    }
+
     static bool IsClient(string processName)
     {
         return Array.IndexOf(Clients, processName) >= 0;

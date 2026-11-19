@@ -22,6 +22,12 @@ class RdpClipboardBridge : Form
     const int BalloonMilliseconds = 5000;
     const int MaxTrayTextLength = 63;
     const int ExtensionsShownInMenu = 4;
+    // How long after the press that completes the count a clipboard update is still converted on
+    // demand: the announcement of the copy may still be on its way from the session.
+    const int OnDemandRequestMilliseconds = 2000;
+    const int OnDemandSettleMilliseconds = 400;
+    // long enough to be seen when there was little or nothing to download
+    const int BusyIconMinimumMilliseconds = 800;
 
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool AddClipboardFormatListener(IntPtr window);
@@ -33,9 +39,14 @@ class RdpClipboardBridge : Form
     readonly ForegroundWatcher foregroundWatcher;
     readonly ToolStripMenuItem pauseMenuItem;
     readonly ToolStripMenuItem startWithWindowsMenuItem;
+    readonly ToolStripMenuItem automaticMenuItem;
+    readonly ToolStripMenuItem convertAutomaticallyMenuItem;
     readonly ToolStripMenuItem fileTypesMenuItem;
     readonly ToolStripMenuItem sizeLimitMenuItem;
     readonly ToolStripMenuItem pauseOnMeteredMenuItem;
+    readonly ToolStripMenuItem onDemandMenuItem;
+    // only there while On Demand is on
+    CopyKeyWatcher copyKeyWatcher;
     bool paused;
     // why the copy on the clipboard was left to Remote Desktop, for the tray tooltip
     LeftAloneReason leftAlone;
@@ -46,6 +57,20 @@ class RdpClipboardBridge : Form
     bool keepMenuOpen;
     uint clipboardUpdates;
     uint updatesLookedAt;
+    // a click and a transfer may overlap, so the busy icon is counted rather than switched
+    readonly System.Windows.Forms.Timer busyIconTimer = new System.Windows.Forms.Timer();
+    readonly System.Windows.Forms.Timer onDemandSettleTimer = new System.Windows.Forms.Timer();
+    int busyCount;
+    int busySinceTick;
+    // a click's pass may end in the close it was asked for, after which the tray icon is gone
+    bool closed;
+    // when the last update arrived, which a pass busy with the clipboard may only look at later
+    int lastClipboardUpdateTick;
+    // On Demand or a click on the tray icon: a request arrived that no pass has looked at yet
+    bool onDemandLookPending;
+    // On Demand: a request is open, from the press at onDemandPressTick on
+    bool onDemandRequested;
+    int onDemandPressTick;
     // downloaded, and waiting for the user to turn to a local app
     StagedCopy staged;
 
@@ -112,10 +137,20 @@ class RdpClipboardBridge : Form
     {
         pauseMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuPause), null, OnPauseClicked);
         startWithWindowsMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuStartWithWindows), null, OnStartWithWindowsClicked);
+        convertAutomaticallyMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuConvertAutomatically), null, OnConvertAutomaticallyClicked);
         fileTypesMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuFileTypes));
         foreach (FileTypeGroup fileType in FileTypes.All) fileTypesMenuItem.DropDownItems.Add(NewFileTypeMenuItem(fileType));
         sizeLimitMenuItem = new ToolStripMenuItem(SizeLimitMenuText(), null, OnSizeLimitClicked);
         pauseOnMeteredMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuPauseOnMetered), null, OnPauseOnMeteredClicked);
+        automaticMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuAutomatic));
+        automaticMenuItem.DropDownItems.Add(convertAutomaticallyMenuItem);
+        automaticMenuItem.DropDownItems.Add(new ToolStripSeparator());
+        automaticMenuItem.DropDownItems.Add(fileTypesMenuItem);
+        automaticMenuItem.DropDownItems.Add(sizeLimitMenuItem);
+        automaticMenuItem.DropDownItems.Add(pauseOnMeteredMenuItem);
+        onDemandMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuOnDemand));
+        onDemandMenuItem.DropDownItems.Add(NewOnDemandMenuItem(OnDemand.Off, Texts.Get(TextId.MenuOnDemandOff)));
+        foreach (int copies in OnDemand.Choices) onDemandMenuItem.DropDownItems.Add(NewOnDemandMenuItem(copies, Texts.Get(TextId.MenuOnDemandCopies, copies)));
         ToolStripMenuItem installMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuInstall), null, OnInstallClicked);
         ToolStripMenuItem uninstallMenuItem = new ToolStripMenuItem(Texts.Get(TextId.MenuUninstall), null, OnUninstallClicked);
         installMenuItem.Visible = !Installation.IsRunningInstalled;
@@ -125,9 +160,8 @@ class RdpClipboardBridge : Form
         menu.Items.Add(pauseMenuItem);
         menu.Items.Add(startWithWindowsMenuItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(fileTypesMenuItem);
-        menu.Items.Add(sizeLimitMenuItem);
-        menu.Items.Add(pauseOnMeteredMenuItem);
+        menu.Items.Add(automaticMenuItem);
+        menu.Items.Add(onDemandMenuItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Texts.Get(TextId.MenuOpenTempFolder), null, OnOpenTempFolderClicked);
         menu.Items.Add(installMenuItem);
@@ -139,6 +173,10 @@ class RdpClipboardBridge : Form
 
         trayIcon.Icon = AppIcon.Small;
         trayIcon.ContextMenuStrip = menu;
+        trayIcon.MouseClick += OnTrayIconClicked;
+        busyIconTimer.Tick += OnBusyIconTimeUp;
+        onDemandSettleTimer.Interval = OnDemandSettleMilliseconds;
+        onDemandSettleTimer.Tick += OnOnDemandSettled;
         UpdateTrayText();
         trayIcon.Visible = true;
 
@@ -154,14 +192,27 @@ class RdpClipboardBridge : Form
         return item;
     }
 
+    ToolStripMenuItem NewOnDemandMenuItem(int copies, string text)
+    {
+        ToolStripMenuItem item = new ToolStripMenuItem(text, null, OnOnDemandClicked);
+        item.Tag = copies;
+        return item;
+    }
+
     // A click closes the whole menu, which would mean opening it again for every file type to tick.
     // The click is reported before the menu is told to close, so that is where it is decided - for
-    // both levels, because the close runs through the submenu and the menu above it.
+    // all three levels, because the close runs through the submenu, Automatic and the menu above.
+    // A click anywhere else decides to close, or a file type ticked before would keep the menu open
+    // after it. Untested on a real desktop: should cancelling not hold, the menu simply closes after
+    // each click, as a plain menu would.
     void KeepOpenWhileTickingFileTypes(ContextMenuStrip menu)
     {
         menu.ItemClicked += delegate { keepMenuOpen = false; };
+        automaticMenuItem.DropDown.ItemClicked += delegate { keepMenuOpen = false; };
+        onDemandMenuItem.DropDown.ItemClicked += delegate { keepMenuOpen = false; };
         fileTypesMenuItem.DropDown.ItemClicked += delegate { keepMenuOpen = true; };
         menu.Closing += OnMenuClosing;
+        automaticMenuItem.DropDown.Closing += OnMenuClosing;
         fileTypesMenuItem.DropDown.Closing += OnMenuClosing;
     }
 
@@ -184,6 +235,8 @@ class RdpClipboardBridge : Form
     {
         base.OnHandleCreated(e);
         AddClipboardFormatListener(Handle);
+        // not before the handle exists, which the request is handed on through
+        UpdateCopyKeyWatcher();
     }
 
     protected override void OnHandleDestroyed(EventArgs e)
@@ -207,7 +260,11 @@ class RdpClipboardBridge : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        closed = true;
         foregroundWatcher.Dispose();
+        RemoveCopyKeyWatcher();
+        busyIconTimer.Dispose();
+        onDemandSettleTimer.Dispose();
         trayIcon.Visible = false;
         trayIcon.Dispose();
         base.OnFormClosed(e);
@@ -223,6 +280,7 @@ class RdpClipboardBridge : Form
         if (message.Msg == WmClipboardUpdate)
         {
             clipboardUpdates++;
+            lastClipboardUpdateTick = Environment.TickCount;
             Bridge();
         }
         base.WndProc(ref message);
@@ -234,9 +292,130 @@ class RdpClipboardBridge : Form
         Bridge();
     }
 
+    // The keyboard hook is installed only while On Demand is on: with it off, the exe watches no keys
+    // at all. See CopyKeyWatcher for why.
+    void UpdateCopyKeyWatcher()
+    {
+        RemoveCopyKeyWatcher();
+        int copies = OnDemand.Copies;
+        if (copies != OnDemand.Off) copyKeyWatcher = new CopyKeyWatcher(copies, OnCopyKeysPressedOnHookThread);
+    }
+
+    void RemoveCopyKeyWatcher()
+    {
+        ForgetOnDemandRequest();
+        if (copyKeyWatcher == null) return;
+        copyKeyWatcher.Dispose();
+        copyKeyWatcher = null;
+    }
+
+    // Hands the request over to the UI thread without waiting for it: the hook thread has to answer
+    // the keyboard at once.
+    void OnCopyKeysPressedOnHookThread(int pressTick)
+    {
+        try
+        {
+            BeginInvoke(new Action<int>(OnCopyKeysPressed), pressTick);
+        }
+        catch (Exception)
+        {
+            // the window is gone - closing, and the request with it
+        }
+    }
+
+    // The announcement of the copy may be on the clipboard already, from the first press, or still on
+    // its way from the session. An update that arrives within OnDemandRequestMilliseconds of the
+    // press is converted on demand; without one, the clipboard is looked at as it is - but only
+    // after a moment. The last press makes the session copy once more, and that takes away the files
+    // a transfer started in the same instant is still reading: every such transfer failed.
+    void OnCopyKeysPressed(int pressTick)
+    {
+        // a request still on its way when On Demand was switched off, or one made while paused
+        if (copyKeyWatcher == null || paused) return;
+
+        onDemandRequested = true;
+        onDemandPressTick = pressTick;
+        onDemandSettleTimer.Stop();
+        onDemandSettleTimer.Start();
+    }
+
+    void OnOnDemandSettled(object sender, EventArgs e)
+    {
+        onDemandSettleTimer.Stop();
+        if (!onDemandRequested || paused) return;
+        onDemandLookPending = true;
+        Bridge();
+    }
+
+    // A left click converts what is on the clipboard now, like On Demand but without its window for
+    // a copy still on its way: the copy was made before the click. It works whatever Automatic and
+    // On Demand are set to; only Pause stops it. The busy icon shows that the click was taken, also
+    // when the copy was converted already or there is nothing to convert.
+    void OnTrayIconClicked(object sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        if (paused) return;
+
+        onDemandLookPending = true;
+        BeginBusyIcon();
+        try
+        {
+            Bridge();
+        }
+        finally
+        {
+            EndBusyIcon();
+        }
+    }
+
+    void BeginBusyIcon()
+    {
+        if (busyCount++ > 0) return;
+        busySinceTick = Environment.TickCount;
+        busyIconTimer.Stop();
+        trayIcon.Icon = AppIcon.SmallBusy;
+    }
+
+    void EndBusyIcon()
+    {
+        if (--busyCount > 0 || closed) return;
+        int shownFor = unchecked(Environment.TickCount - busySinceTick);
+        if (shownFor >= BusyIconMinimumMilliseconds)
+        {
+            trayIcon.Icon = AppIcon.Small;
+            return;
+        }
+        busyIconTimer.Interval = BusyIconMinimumMilliseconds - shownFor;
+        busyIconTimer.Start();
+    }
+
+    void OnBusyIconTimeUp(object sender, EventArgs e)
+    {
+        busyIconTimer.Stop();
+        // a transfer may have started meanwhile
+        if (busyCount == 0) trayIcon.Icon = AppIcon.Small;
+    }
+
+    void ForgetOnDemandRequest()
+    {
+        onDemandRequested = false;
+        onDemandLookPending = false;
+        onDemandSettleTimer.Stop();
+    }
+
+    bool IsAskedForOnDemand(bool lookRequested, string copiedFiles)
+    {
+        if (lookRequested) return true;
+        if (!onDemandRequested) return false;
+        // unchecked, so that the difference stays right when TickCount wraps around
+        int updateAfterPress = unchecked(lastClipboardUpdateTick - onDemandPressTick);
+        return updateAfterPress >= 0 && updateAfterPress <= OnDemandRequestMilliseconds;
+    }
+
     // Every question put to the clipboard is a COM call into mstsc, and COM keeps dispatching window
     // messages while it waits - so the next clipboard update or change of window arrives in the
-    // middle of this. Those are only noted, and the pass that is running goes round again for them.
+    // middle of this, and so does an On Demand request. Those are only noted, and the pass that is
+    // running goes round again for them.
     void Bridge()
     {
         if (bridging) return;
@@ -244,7 +423,7 @@ class RdpClipboardBridge : Form
         bridging = true;
         try
         {
-            while (!paused && !closeWhenIdle && (clipboardUpdates != updatesLookedAt || foregroundChanged))
+            while (!paused && !closeWhenIdle && (clipboardUpdates != updatesLookedAt || onDemandLookPending || foregroundChanged))
             {
                 TryBridgeOnce();
             }
@@ -260,10 +439,12 @@ class RdpClipboardBridge : Form
     {
         try
         {
-            if (clipboardUpdates != updatesLookedAt)
+            if (clipboardUpdates != updatesLookedAt || onDemandLookPending)
             {
+                bool lookRequested = onDemandLookPending;
                 updatesLookedAt = clipboardUpdates;
-                StageClipboard();
+                onDemandLookPending = false;
+                StageClipboard(lookRequested);
             }
             foregroundChanged = false;
             HandOverStagedCopy();
@@ -274,28 +455,49 @@ class RdpClipboardBridge : Form
         }
     }
 
-    // Downloads what was copied in the session, without touching the clipboard yet.
-    void StageClipboard()
+    // Downloads what was copied in the session, without touching the clipboard yet. lookRequested is
+    // true when an On Demand request or a click on the tray icon, not a clipboard update, sent the
+    // pass here - it converts whatever the filter says.
+    void StageClipboard(bool lookRequested)
     {
-        if (!VirtualFileClipboard.HasVirtualFilesOnly() || !RemoteDesktop.OwnsClipboard())
+        bool virtualFilesOnly = VirtualFileClipboard.HasVirtualFilesOnly();
+        bool fromRemoteDesktop = RemoteDesktop.OwnsClipboard();
+        if (!virtualFilesOnly || !fromRemoteDesktop)
         {
             LeaveAlone(LeftAloneReason.None);
             return;
         }
 
-        // Converting transfers every copied file right away, pasted or not. Left alone, Remote
-        // Desktop transfers only what is pasted - which is what a metered connection wants.
-        if (Settings.IsOn(Settings.PauseOnMetered) && NetworkCost.IsMetered())
+        using (ClipboardFiles clipboard = VirtualFileClipboard.ReadClipboardFiles())
         {
-            LeaveAlone(LeftAloneReason.MeteredConnection);
-            return;
-        }
+            bool onDemand = IsAskedForOnDemand(lookRequested, clipboard.CopiedFiles);
+            // The same copy, announced once more or asked for on demand after Automatic took it: it
+            // is downloaded already, and must not be judged again either - a copy converted on
+            // demand would be dropped by the filter.
+            // Unless files of it failed: then copying it again is the way to try once more.
+            if (staged != null && staged.CopiedFiles == clipboard.CopiedFiles && staged.FailedCount == 0) return;
 
-        StagedCopy copy = VirtualFileClipboard.Stage(staged, IsAbandoned);
-        // the same copy, announced once more
-        if (copy == staged) return;
-        staged = copy.IsWorthKeeping ? copy : null;
-        ShowLeftAlone(copy.LeftAlone);
+            LeftAloneReason reason = onDemand ? LeftAloneReason.None : CopyFilter.ReasonToLeaveAlone(clipboard.Files);
+            if (reason != LeftAloneReason.None)
+            {
+                LeaveAlone(reason);
+                return;
+            }
+
+            // a copy left alone before is converted on demand now, so the tooltip's reason is past
+            ShowLeftAlone(LeftAloneReason.None);
+            StagedCopy copy;
+            BeginBusyIcon();
+            try
+            {
+                copy = VirtualFileClipboard.Stage(clipboard, IsAbandoned);
+            }
+            finally
+            {
+                EndBusyIcon();
+            }
+            staged = copy.IsWorthKeeping ? copy : null;
+        }
     }
 
     void LeaveAlone(LeftAloneReason reason)
@@ -366,11 +568,27 @@ class RdpClipboardBridge : Form
 
         keepMenuOpen = false;
         startWithWindowsMenuItem.Checked = Installation.IsAutostartFor(Installation.CurrentExePath);
-        pauseOnMeteredMenuItem.Checked = Settings.IsOn(Settings.PauseOnMetered);
+        ShowAutomaticSettings();
         foreach (ToolStripMenuItem item in fileTypesMenuItem.DropDownItems)
         {
             item.Checked = ((FileTypeGroup)item.Tag).IsConverted;
         }
+        int onDemandCopies = OnDemand.Copies;
+        foreach (ToolStripMenuItem item in onDemandMenuItem.DropDownItems)
+        {
+            item.Checked = (int)item.Tag == onDemandCopies;
+        }
+    }
+
+    // The filters only apply to what is converted automatically, so they are greyed out without it.
+    void ShowAutomaticSettings()
+    {
+        bool automatic = Settings.IsOn(Settings.AutoConvert, true);
+        convertAutomaticallyMenuItem.Checked = automatic;
+        fileTypesMenuItem.Enabled = automatic;
+        sizeLimitMenuItem.Enabled = automatic;
+        pauseOnMeteredMenuItem.Enabled = automatic;
+        pauseOnMeteredMenuItem.Checked = Settings.IsOn(Settings.PauseOnMetered);
         sizeLimitMenuItem.Text = SizeLimitMenuText();
     }
 
@@ -380,6 +598,19 @@ class RdpClipboardBridge : Form
     }
 
     // The switches below apply from the next copy; what is on the clipboard now stays as it is.
+    void OnConvertAutomaticallyClicked(object sender, EventArgs e)
+    {
+        Settings.Set(Settings.AutoConvert, !convertAutomaticallyMenuItem.Checked);
+        // whatever reason the tooltip names, the copy was judged by switches that changed meaning
+        ShowLeftAlone(LeftAloneReason.None);
+    }
+
+    void OnOnDemandClicked(object sender, EventArgs e)
+    {
+        OnDemand.Set((int)((ToolStripMenuItem)sender).Tag);
+        UpdateCopyKeyWatcher();
+    }
+
     void OnFileTypeClicked(object sender, EventArgs e)
     {
         ToolStripMenuItem item = (ToolStripMenuItem)sender;
@@ -419,6 +650,7 @@ class RdpClipboardBridge : Form
     {
         paused = !paused;
         staged = null;
+        ForgetOnDemandRequest();
         updatesLookedAt = clipboardUpdates;
         pauseMenuItem.Text = Texts.Get(paused ? TextId.MenuResume : TextId.MenuPause);
         UpdateTrayText();

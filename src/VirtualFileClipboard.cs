@@ -18,8 +18,6 @@ class StagedCopy
     public int FailedCount;
     // given up half way, because nobody was waiting for it any more
     public bool Abandoned;
-    // not downloaded at all, but left to Remote Desktop
-    public LeftAloneReason LeftAlone;
 
     public StagedCopy(string copiedFiles)
     {
@@ -47,16 +45,32 @@ sealed class ClipboardFiles : IDisposable
 {
     public readonly ComTypes.IDataObject Data;
     public readonly List<VirtualFile> Files;
+    // names, sizes and dates of the files, to recognise the same copy when it is announced again
+    public readonly string CopiedFiles;
 
     public ClipboardFiles(ComTypes.IDataObject data, List<VirtualFile> files)
     {
         Data = data;
         Files = files;
+        CopiedFiles = Describe(files);
     }
 
     public void Dispose()
     {
         Marshal.ReleaseComObject(Data);
+    }
+
+    // Parsed fields rather than the raw descriptor, whose unused bytes need not be the same twice.
+    // The date is part of it so that a file changed and copied again is not taken for the old one.
+    static string Describe(List<VirtualFile> files)
+    {
+        StringBuilder description = new StringBuilder();
+        foreach (VirtualFile file in files)
+        {
+            description.Append(file.DescriptorIndex).Append('|').Append(file.RemoteName).Append('|');
+            description.Append(file.KnownSize).Append('|').Append(file.LastWriteTimeUtc.GetValueOrDefault().Ticks).Append('\n');
+        }
+        return description.ToString();
     }
 }
 
@@ -112,37 +126,30 @@ static class VirtualFileClipboard
         return IsClipboardFormatAvailable(FileGroupDescriptorFormat) && !IsClipboardFormatAvailable(CfHdrop);
     }
 
-    // Downloads what the clipboard announces into a new batch folder. Returns alreadyStaged itself
-    // when that is what the clipboard still holds: the same copy must not be transferred twice.
-    public static StagedCopy Stage(StagedCopy alreadyStaged, Func<string, bool> isAbandoned)
+    // Downloads what the clipboard announces into a new batch folder. Whether it should be is decided
+    // before, from the same file list.
+    public static StagedCopy Stage(ClipboardFiles clipboard, Func<string, bool> isAbandoned)
     {
-        using (ClipboardFiles clipboard = ReadClipboardFiles())
+        string copiedFiles = clipboard.CopiedFiles;
+        StagedCopy copy = new StagedCopy(copiedFiles);
+        if (clipboard.Files.Count == 0) return copy;
+
+        Func<bool> abandoned = delegate { return isAbandoned(copiedFiles); };
+        string batchFolder = StagingFolder.StartNewBatch();
+        try
         {
-            string copiedFiles = Describe(clipboard.Files);
-            if (alreadyStaged != null && alreadyStaged.CopiedFiles == copiedFiles) return alreadyStaged;
-
-            StagedCopy copy = new StagedCopy(copiedFiles);
-            if (clipboard.Files.Count == 0) return copy;
-            copy.LeftAlone = CopyFilter.ReasonToLeaveAlone(clipboard.Files);
-            if (copy.LeftAlone != LeftAloneReason.None) return copy;
-
-            Func<bool> abandoned = delegate { return isAbandoned(copiedFiles); };
-            string batchFolder = StagingFolder.StartNewBatch();
-            try
+            foreach (VirtualFile file in clipboard.Files)
             {
-                foreach (VirtualFile file in clipboard.Files)
-                {
-                    string topLevelPath = TryExtract(clipboard.Data, file, batchFolder, abandoned);
-                    if (topLevelPath == null) copy.FailedCount++;
-                    else if (!ContainsPath(copy.TopLevelPaths, topLevelPath)) copy.TopLevelPaths.Add(topLevelPath);
-                }
+                string topLevelPath = TryExtract(clipboard.Data, file, batchFolder, abandoned);
+                if (topLevelPath == null) copy.FailedCount++;
+                else if (!ContainsPath(copy.TopLevelPaths, topLevelPath)) copy.TopLevelPaths.Add(topLevelPath);
             }
-            catch (TransferAbandonedException)
-            {
-                copy.Abandoned = true;
-            }
-            return copy;
         }
+        catch (TransferAbandonedException)
+        {
+            copy.Abandoned = true;
+        }
+        return copy;
     }
 
     // Compared by content, because whether reading the files moves the clipboard sequence number is
@@ -152,13 +159,13 @@ static class VirtualFileClipboard
         if (!HasVirtualFilesOnly()) return false;
         using (ClipboardFiles clipboard = ReadClipboardFiles())
         {
-            return Describe(clipboard.Files) == copiedFiles;
+            return clipboard.CopiedFiles == copiedFiles;
         }
     }
 
     // Getting the clipboard's data object and asking it for the file list are retried as one step:
     // either of them can find mstsc still holding the clipboard open.
-    static ClipboardFiles ReadClipboardFiles()
+    public static ClipboardFiles ReadClipboardFiles()
     {
         return ClipboardRetry.Run<ClipboardFiles>(delegate
         {
@@ -173,19 +180,6 @@ static class VirtualFileClipboard
                 throw;
             }
         });
-    }
-
-    // Parsed fields rather than the raw descriptor, whose unused bytes need not be the same twice.
-    // The date is part of it so that a file changed and copied again is not taken for the old one.
-    static string Describe(List<VirtualFile> files)
-    {
-        StringBuilder description = new StringBuilder();
-        foreach (VirtualFile file in files)
-        {
-            description.Append(file.DescriptorIndex).Append('|').Append(file.RemoteName).Append('|');
-            description.Append(file.KnownSize).Append('|').Append(file.LastWriteTimeUtc.GetValueOrDefault().Ticks).Append('\n');
-        }
-        return description.ToString();
     }
 
     // Straight from ole32 instead of Clipboard.GetDataObject: FileContents has to be requested per

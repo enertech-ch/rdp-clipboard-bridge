@@ -22,6 +22,34 @@ static class AppIcon
     // handle, the tray and the dialog share them, and Windows frees them when the process ends.
     public static readonly Icon Small = Load(SystemInformation.SmallIconSize);
     public static readonly Icon Large = Load(SystemInformation.IconSize);
+    // the tray icon while files are downloaded
+    public static readonly Icon SmallBusy = SwapRedAndBlue(Small);
+
+    // Turns the blue board orange and leaves the white arrow white, so the busy icon is the same
+    // drawing - small frame, anti-aliasing and all - without a second .ico to keep in step.
+    static Icon SwapRedAndBlue(Icon icon)
+    {
+        try
+        {
+            using (Bitmap bitmap = icon.ToBitmap())
+            {
+                for (int y = 0; y < bitmap.Height; y++)
+                {
+                    for (int x = 0; x < bitmap.Width; x++)
+                    {
+                        Color pixel = bitmap.GetPixel(x, y);
+                        bitmap.SetPixel(x, y, Color.FromArgb(pixel.A, pixel.B, pixel.G, pixel.R));
+                    }
+                }
+                // the handle lives as long as the process, like the loaded ones
+                return Icon.FromHandle(bitmap.GetHicon());
+            }
+        }
+        catch (Exception)
+        {
+            return icon;
+        }
+    }
 
     static Icon Load(Size size)
     {

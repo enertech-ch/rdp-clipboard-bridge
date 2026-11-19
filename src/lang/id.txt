@@ -2,6 +2,11 @@
 MenuPause = Jeda
 MenuResume = Lanjutkan
 MenuStartWithWindows = Mulai bersama Windows
+MenuAutomatic = Otomatis
+MenuConvertAutomatically = Konversi Otomatis
+MenuOnDemand = Sesuai Permintaan
+MenuOnDemandOff = Nonaktif
+MenuOnDemandCopies = Tekan Ctrl+C {0}× Berturut-turut
 MenuOpenTempFolder = Buka Folder Sementara
 MenuPauseOnMetered = Jeda pada Koneksi Terukur
 MenuFileTypes = Jenis File

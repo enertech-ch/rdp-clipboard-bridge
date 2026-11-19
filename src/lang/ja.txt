@@ -2,6 +2,11 @@
 MenuPause = 一時停止
 MenuResume = 再開
 MenuStartWithWindows = Windows の起動時に開始
+MenuAutomatic = 自動
+MenuConvertAutomatically = 自動で変換
+MenuOnDemand = オンデマンド
+MenuOnDemandOff = オフ
+MenuOnDemandCopies = Ctrl+C を {0} 回続けて押す
 MenuOpenTempFolder = 一時フォルダーを開く
 MenuPauseOnMetered = 従量制課金接続では一時停止
 MenuFileTypes = ファイルの種類

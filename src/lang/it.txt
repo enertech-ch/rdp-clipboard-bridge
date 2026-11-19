@@ -2,6 +2,11 @@
 MenuPause = Sospendi
 MenuResume = Riprendi
 MenuStartWithWindows = Avvia con Windows
+MenuAutomatic = Automatico
+MenuConvertAutomatically = Converti automaticamente
+MenuOnDemand = Su richiesta
+MenuOnDemandOff = Disattivato
+MenuOnDemandCopies = Premere CTRL+C {0}× di seguito
 MenuOpenTempFolder = Apri cartella temporanea
 MenuPauseOnMetered = Sospendi con connessione a consumo
 MenuFileTypes = Tipi di file
